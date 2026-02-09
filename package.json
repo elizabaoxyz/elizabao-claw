@@ -1,0 +1,38 @@
+{
+  "name": "elizabao-claw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ElizaBAO + Claw: ElizaOS agent with Moltbook + x402-style Solana paywalls",
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "agent:moltbook": "bun src/agent-moltbook.ts",
+    "moltbook:update-profile": "bun src/moltbook-update-profile.ts",
+    "moltbook:me": "bun src/moltbook-me.ts",
+    "moltbook:post": "bun src/moltbook-post.ts",
+    "moltbook:post-verified": "bun src/moltbook-post-verified.ts",
+    "moltbook:verify": "bun src/moltbook-verify.ts",
+    "moltbook:comments": "bun src/moltbook-comments.ts",
+    "moltbook:comment": "bun src/moltbook-comment.ts",
+    "moltbook:comment-verified": "bun src/moltbook-comment-verified.ts",
+    "lint": "eslint . --ext .ts || true"
+  },
+  "dependencies": {
+    "@elizaos/core": "2.0.0-alpha.3",
+    "@elizaos/plugin-moltbook": "2.0.0-alpha.3",
+    "@elizaos/plugin-sql": "2.0.0-alpha.3",
+    "@hono/node-server": "^1.19.9",
+    "@solana/web3.js": "^1.98.0",
+    "dotenv": "^16.6.1",
+    "hono": "^4.11.7",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
