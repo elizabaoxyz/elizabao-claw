@@ -1,0 +1,6 @@
+[submodule "plugin-moltbook"]
+	path = vendor/plugin-moltbook
+	url = https://github.com/elizaos-plugins/plugin-moltbook
+[submodule "lalalune-polymarket-agent"]
+	path = vendor/lalalune-polymarket-agent
+	url = https://github.com/lalalune/polymarket-agent
