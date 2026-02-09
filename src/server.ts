@@ -4,6 +4,14 @@ import { Hono } from "hono";
 import { Connection } from "@solana/web3.js";
 import { fetchSolUsdPrice, readX402ConfigFromEnv, usdToLamports, verifySolPayment } from "./x402-solana.js";
 import { fetchGammaMarkets, getGammaApiUrl, topYesNoSignals } from "./polymarket-gamma.js";
+import {
+  buildAccepts,
+  create402Body,
+  encodeBase64Json,
+  extractPaymentFromHeaders,
+  getX402TreasuryAddress,
+  settleAndVerifyPayment,
+} from "./x402-agentinc.js";
 
 const app = new Hono();
 
@@ -27,20 +35,22 @@ app.get("/x402/pricing", async (c) => {
   const cfg = readX402ConfigFromEnv(process.env);
   const solUsd = await fetchSolUsdPrice().catch(() => null);
   const requiredLamports = solUsd ? usdToLamports({ usd: cfg.X402_PRICE_USD, solUsd }) : null;
+  const treasury = getX402TreasuryAddress() || null;
   return c.json({
     ok: true,
     pricing: {
       usd: cfg.X402_PRICE_USD,
       solUsd,
       requiredLamports,
-      treasury: cfg.X402_TREASURY_ADDRESS || null,
+      treasury,
       headers: {
-        paymentTx: "X-Payment-Tx: <solana signature>",
+        payment: "X-PAYMENT: base64(JSON(paymentPayload))",
+        paymentTxFallback: "X-Payment-Tx: <solana signature> (manual fallback)",
       },
       notes:
         cfg.X402_DEV_BYPASS
           ? ["Dev bypass enabled: /signals/daily will not require payment.", "Set X402_DEV_BYPASS=false to enforce payments."]
-          : cfg.X402_TREASURY_ADDRESS
+          : treasury
             ? []
             : ["Set X402_TREASURY_ADDRESS in .env to enable payment verification."],
     },
@@ -59,7 +69,8 @@ app.get("/signals/daily", async (c) => {
     });
   }
 
-  if (!cfg.X402_TREASURY_ADDRESS) {
+  const treasury = getX402TreasuryAddress();
+  if (!treasury) {
     return c.json(
       {
         ok: false,
@@ -71,46 +82,83 @@ app.get("/signals/daily", async (c) => {
     );
   }
 
-  const txSig = c.req.header("x-payment-tx") || "";
-  if (!txSig.trim()) {
+  const solUsd = await fetchSolUsdPrice().catch(() => null);
+  if (!solUsd) {
     return c.json(
       {
         ok: false,
-        error: "payment required",
-        how: "Send a Solana transfer to treasury, then retry with X-Payment-Tx header",
-        treasury: cfg.X402_TREASURY_ADDRESS,
+        error: "pricing unavailable",
+        reason: "Failed to fetch SOL/USD price from upstream",
+        tip: "Retry in a few seconds or set X402_DEV_BYPASS=true for local dev.",
       },
-      402
+      502
     );
+  }
+  const requiredLamports = BigInt(usdToLamports({ usd: cfg.X402_PRICE_USD, solUsd }));
+  const accepts = buildAccepts({
+    lamports: requiredLamports,
+    resource: String(c.req.url),
+    description: "Unlock daily signal",
+    usdAmount: cfg.X402_PRICE_USD,
+    solPrice: solUsd,
+  });
+
+  // Manual fallback: allow passing just a transaction signature.
+  // This makes demoing with Phantom easy while keeping the x402 `X-PAYMENT` path as the primary flow.
+  const paymentTx = (c.req.header("x-payment-tx") || c.req.header("X-Payment-Tx") || "").trim();
+  if (paymentTx) {
+    const connection = new Connection(cfg.SOLANA_RPC_URL, "confirmed");
+    const check = await verifySolPayment({
+      connection,
+      treasuryAddress: treasury,
+      txSignature: paymentTx,
+      requiredLamports: Number(requiredLamports),
+    });
+    if (!check.ok) {
+      const body = create402Body({ accepts, error: check.reason });
+      return c.json(body, 402, { "X-Payment-Required": encodeBase64Json(body) });
+    }
+    return c.json({
+      ok: true,
+      paid: true,
+      payment: {
+        network: "solana",
+        transaction: check.txSig,
+        paidLamports: String(check.paidLamports),
+        payer: null,
+        flow: "txSig",
+      },
+      signal: demoSignal(),
+    });
+  }
+
+  const parsed = extractPaymentFromHeaders(c.req.raw.headers);
+  if (!parsed.ok) {
+    const body = create402Body({ accepts });
+    return c.json(body, 402, { "X-Payment-Required": encodeBase64Json(body) });
   }
 
   const connection = new Connection(cfg.SOLANA_RPC_URL, "confirmed");
-  const solUsd = await fetchSolUsdPrice();
-  const requiredLamports = usdToLamports({ usd: cfg.X402_PRICE_USD, solUsd });
-
-  const check = await verifySolPayment({
+  const verify = await settleAndVerifyPayment({
     connection,
-    treasuryAddress: cfg.X402_TREASURY_ADDRESS,
-    txSignature: txSig,
+    signedTxBase64: parsed.txBase64,
     requiredLamports,
+    treasuryAddress: treasury,
   });
-
-  if (!check.ok) {
-    return c.json(
-      {
-        ok: false,
-        error: "payment not verified",
-        reason: check.reason,
-        require: { requiredLamports, solUsd, usd: cfg.X402_PRICE_USD, treasury: cfg.X402_TREASURY_ADDRESS },
-      },
-      402
-    );
+  if (!verify.ok) {
+    const body = create402Body({ accepts, error: verify.reason });
+    return c.json(body, 402, { "X-Payment-Required": encodeBase64Json(body) });
   }
 
   return c.json({
     ok: true,
     paid: true,
-    payment: check,
+    payment: {
+      network: "solana",
+      transaction: verify.signature,
+      paidLamports: verify.paidLamports.toString(),
+      payer: verify.payer ?? null,
+    },
     signal: demoSignal(),
   });
 });
@@ -132,7 +180,8 @@ app.get("/signals/polymarket/top", async (c) => {
   // In bypass mode, return signals freely (nice for local dev).
   // In paid mode, require a payment tx (same flow as /signals/daily).
   if (!cfg.X402_DEV_BYPASS) {
-    if (!cfg.X402_TREASURY_ADDRESS) {
+    const treasury = getX402TreasuryAddress();
+    if (!treasury) {
       return c.json(
         {
           ok: false,
@@ -142,39 +191,60 @@ app.get("/signals/polymarket/top", async (c) => {
         500
       );
     }
-    const txSig = c.req.header("x-payment-tx") || "";
-    if (!txSig.trim()) {
+    const solUsd = await fetchSolUsdPrice().catch(() => null);
+    if (!solUsd) {
       return c.json(
         {
           ok: false,
-          error: "payment required",
-          how: "Send a Solana transfer to treasury, then retry with X-Payment-Tx header",
-          treasury: cfg.X402_TREASURY_ADDRESS,
+          error: "pricing unavailable",
+          reason: "Failed to fetch SOL/USD price from upstream",
         },
-        402
+        502
       );
+    }
+    const requiredLamports = BigInt(usdToLamports({ usd: cfg.X402_PRICE_USD, solUsd }));
+    const accepts = buildAccepts({
+      lamports: requiredLamports,
+      resource: String(c.req.url),
+      description: "Unlock Polymarket top signals",
+      usdAmount: cfg.X402_PRICE_USD,
+      solPrice: solUsd,
+    });
+
+    const paymentTx = (c.req.header("x-payment-tx") || c.req.header("X-Payment-Tx") || "").trim();
+    if (paymentTx) {
+      const connection = new Connection(cfg.SOLANA_RPC_URL, "confirmed");
+      const check = await verifySolPayment({
+        connection,
+        treasuryAddress: treasury,
+        txSignature: paymentTx,
+        requiredLamports: Number(requiredLamports),
+      });
+      if (!check.ok) {
+        const body = create402Body({ accepts, error: check.reason });
+        return c.json(body, 402, { "X-Payment-Required": encodeBase64Json(body) });
+      }
+      // continue to compute and return signals (paid)
+    } else {
+      const parsed = extractPaymentFromHeaders(c.req.raw.headers);
+      if (!parsed.ok) {
+        const body = create402Body({ accepts });
+        return c.json(body, 402, { "X-Payment-Required": encodeBase64Json(body) });
+      }
+
+      const connection = new Connection(cfg.SOLANA_RPC_URL, "confirmed");
+      const verify = await settleAndVerifyPayment({
+        connection,
+        signedTxBase64: parsed.txBase64,
+        requiredLamports,
+        treasuryAddress: treasury,
+      });
+      if (!verify.ok) {
+        const body = create402Body({ accepts, error: verify.reason });
+        return c.json(body, 402, { "X-Payment-Required": encodeBase64Json(body) });
+      }
     }
 
-    const connection = new Connection(cfg.SOLANA_RPC_URL, "confirmed");
-    const solUsd = await fetchSolUsdPrice();
-    const requiredLamports = usdToLamports({ usd: cfg.X402_PRICE_USD, solUsd });
-    const check = await verifySolPayment({
-      connection,
-      treasuryAddress: cfg.X402_TREASURY_ADDRESS,
-      txSignature: txSig,
-      requiredLamports,
-    });
-    if (!check.ok) {
-      return c.json(
-        {
-          ok: false,
-          error: "payment not verified",
-          reason: check.reason,
-          require: { requiredLamports, solUsd, usd: cfg.X402_PRICE_USD, treasury: cfg.X402_TREASURY_ADDRESS },
-        },
-        402
-      );
-    }
   }
 
   const limit = Math.max(1, Math.min(50, Number(c.req.query("limit") || 10)));

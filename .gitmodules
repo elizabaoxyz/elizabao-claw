@@ -4,3 +4,6 @@
 [submodule "lalalune-polymarket-agent"]
 	path = vendor/lalalune-polymarket-agent
 	url = https://github.com/lalalune/polymarket-agent
+[submodule "agentinc"]
+	path = vendor/agentinc
+	url = https://github.com/ChristopherTrimboli/agentinc

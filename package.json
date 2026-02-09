@@ -7,7 +7,11 @@
   "scripts": {
     "dev": "bun --watch src/server.ts",
     "start": "bun src/server.ts",
+    "x402:demo": "bun src/x402-demo-pay.ts",
     "agent:moltbook": "bun src/agent-moltbook.ts",
+    "moltbook:daily-teaser": "bun src/moltbook-daily-teaser.ts",
+    "moltbook:new-markets": "bun src/moltbook-new-markets.ts",
+    "moltbook:whale-watch": "bun src/moltbook-whale-watch.ts",
     "moltbook:update-profile": "bun src/moltbook-update-profile.ts",
     "moltbook:me": "bun src/moltbook-me.ts",
     "moltbook:post": "bun src/moltbook-post.ts",
@@ -24,6 +28,7 @@
     "@elizaos/plugin-sql": "2.0.0-alpha.3",
     "@hono/node-server": "^1.19.9",
     "@solana/web3.js": "^1.98.0",
+    "bs58": "^6.0.0",
     "dotenv": "^16.6.1",
     "hono": "^4.11.7",
     "zod": "^4.3.6"
